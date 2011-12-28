@@ -31,8 +31,15 @@
 
 ;;; Changelog:
 
+;; 2011/12/27
+;;     * New variable: `sdcv-word-processor'
+;;     * Breaking change:
+;;       for `sdcv-dictionary-list' and `sdcv-dictionary-alist',
+;;       non-list (non-nil) value now means full dictionary list
+;;     * Rewrite `sdcv-search' for both interactive and non-interactive use
+;;     * `sdcv-dictionary-list' is left for customization use only
 ;; 2011/06/30
-;;     * New feature: parse output for failed look-up
+;;     * New feature: parse output for failed lookup
 ;;     * Keymap modification
 ;;
 ;; 2008/06/11
@@ -47,10 +54,21 @@
 
 ;;; ==================================================================
 ;;; Frontend, search word and display sdcv buffer
-(defun sdcv-search (select-dictionary-list)
-  "Prompt for a word to search through sdcv.
-When provided with a prefix argument, select new
-`sdcv-dictionary-list' before search.
+(defun sdcv-search (word &optional dict-list-name dict-list interactive-p)
+  "Search WORD through the command-line tool sdcv.
+The result will be displayed in buffer named with
+`sdcv-buffer-name' with `sdcv-mode' if called interactively.
+
+When provided with DICT-LIST-NAME, query `sdcv-dictionary-alist'
+to get the new dictionary list before search.
+Alternatively, dictionary list can be specified directly
+by DICT-LIST.  Any non-list value of it means using all dictionaries.
+
+When called interactively, prompt for the word.
+Prefix argument have the following meaning:
+If `sdcv-dictionary-alist' is defined, 
+use prefix argument to select a new DICT-LIST-NAME.
+Otherwise, prefix argument means using all dictionaries.
 
 Word may contain some special characters:
     *       match zero or more characters
@@ -58,39 +76,46 @@ Word may contain some special characters:
     /       used at the beginning, for fuzzy search
     |       used at the beginning, for data search
     \       escape the character right after"
-  (interactive "P")
-  (when select-dictionary-list
+  (interactive
+   (let* ((dict-list-name
+           (and current-prefix-arg sdcv-dictionary-alist
+                (completing-read "Select dictionary list: "
+                                 sdcv-dictionary-alist nil t)))
+          (dict-list
+           (and current-prefix-arg (not sdcv-dictionary-alist)))
+          (guess (or (and transient-mark-mode mark-active
+                          (buffer-substring-no-properties
+                           (region-beginning) (region-end)))
+                     (current-word nil t)))
+          (word (read-string (format "Search dict (default: %s): " guess)
+                             nil nil guess)))
+     (list word dict-list-name dict-list t)))
+  ;; init current dictionary list
+  (when (null sdcv-current-dictionary-list)
+    (setq sdcv-current-dictionary-list sdcv-dictionary-list))
+  ;; dict-list-name to dict-list
+  (when (and (not dict-list) dict-list-name)
     (if (not sdcv-dictionary-alist)
-        (error "ERROR: no `sdcv-dictionary-alist' defined.")
-      ;; select sdcv-dictionary-list
-      (setq sdcv-dictionary-list
-            (cdr (assoc
-                  (completing-read "Select dictionary list: "
-                                   sdcv-dictionary-alist nil t)
-                  sdcv-dictionary-alist)))
-      ;; kill sdcv process
-      (and (get-process sdcv-process-name)
-           (kill-process (get-process sdcv-process-name)))))
-  (let ((word (if (and transient-mark-mode mark-active)
-                  (buffer-substring-no-properties (region-beginning)
-                                                  (region-end))
-                (sdcv-current-word))))
-    (setq word (read-string
-                (format "Search dict (default %s): " word)
-                nil nil word))
-    (sdcv-search-word word)))
-
-(defun sdcv-search-word (word)
-  "Search WORD through the command-line tool sdcv.
-The result will be displayed in buffer named with
-`sdcv-buffer-name' with `sdcv-mode'."
-  (with-current-buffer (get-buffer-create sdcv-buffer-name)
-    (setq buffer-read-only nil)
-    (erase-buffer)
-    (insert (sdcv-do-lookup word)))
-  (sdcv-goto-sdcv)
-  (sdcv-mode)
-  (sdcv-mode-reinit))
+        (error "`sdcv-dictionary-alist' not defined"))
+    (setq dict-list
+          (cdr (assoc dict-list-name sdcv-dictionary-alist))))
+  ;; prepare new dictionary list
+  (when (and dict-list (not (equal sdcv-current-dictionary-list dict-list)))
+    (setq sdcv-current-dictionary-list dict-list)
+    ;; kill sdcv process
+    (and (get-process sdcv-process-name)
+         (kill-process (get-process sdcv-process-name)))
+    (while (get-process sdcv-process-name)
+      (sleep-for 0.01)))
+  (if (not interactive-p)
+      (funcall sdcv-word-processor word)
+      (with-current-buffer (get-buffer-create sdcv-buffer-name)
+        (setq buffer-read-only nil)
+        (erase-buffer)
+        (insert (funcall sdcv-word-processor word)))
+    (sdcv-goto-sdcv)
+    (sdcv-mode)
+    (sdcv-mode-reinit)))
 
 (defun sdcv-list-dictionary ()
   "Show available dictionaries."
@@ -98,35 +123,20 @@ The result will be displayed in buffer named with
   (let (resize-mini-windows)
     (shell-command "sdcv -l" sdcv-buffer-name)))
 
+(defvar sdcv-current-dictionary-list nil)
+
 (defun sdcv-generate-dictionary-argument ()
-  "Generate dictionary argument for sdcv from `sdcv-dictionary-list'
+  "Generate dictionary argument for sdcv from `sdcv-current-dictionary-list'
 and `sdcv-dictionary-path'."
   (append
-   (if (null sdcv-dictionary-path)
-       '()
-     (list "--data-dir" sdcv-dictionary-path))
-   (if (null sdcv-dictionary-list)
-       '()
-     (mapcan (lambda (dict)
-               (list "-u" dict))
-             sdcv-dictionary-list))))
+   (and sdcv-dictionary-path (list "--data-dir" sdcv-dictionary-path))
+   (and (listp sdcv-current-dictionary-list)
+        (mapcan (lambda (dict)
+                  (list "-u" dict))
+                sdcv-current-dictionary-list))))
 
 ;;; ==================================================================
 ;;; utilities to switch from and to sdcv buffer
-(defun sdcv-current-word ()
-  "Get the current word under the cursor."
-  (if (or (< emacs-major-version 21)
-          (and (= emacs-major-version 21)
-               (< emacs-minor-version 4)))
-      (sdcv-current-word-1)
-    ;; We have a powerful `current-word' function since 21.4
-    (current-word nil t)))
-(defun sdcv-current-word-1 ()
-  (save-excursion
-    (backward-word 1)
-    (mark-word 1)
-    (buffer-substring-no-properties (region-beginning)
-                                    (region-end))))
 (defvar sdcv-previous-window-conf nil
   "Window configuration before switching to sdcv buffer.")
 (defun sdcv-goto-sdcv ()
@@ -337,23 +347,25 @@ current buffer."
         (setq done t)))
     done))
 
-
+
 ;;;;##################################################################
 ;;;;  User Options, Variables
 ;;;;##################################################################
 
 (defvar sdcv-buffer-name "*sdcv*"
   "The name of the buffer of sdcv.")
-(defvar sdcv-dictionary-list nil
+(defvar sdcv-dictionary-list t
   "A list of dictionaries to use.
 Each entry is a string denoting the name of a dictionary, which
-is then passed to sdcv through the '-u' command line option. If
-this list is nil then all the dictionaries will be used.")
+is then passed to sdcv through the '-u' command line option. 
+Any non-list value means using all the dictionaries.")
 (defvar sdcv-dictionary-alist nil
   "An alist of dictionaries, used to interactively form
- sdcv-dictionary-list. It has the form:
-   ((\"group1\" \"dict1\" \"dict2\" ...)
+dictionary list. It has the form:
+   ((\"full\" . t)
+    (\"group1\" \"dict1\" \"dict2\" ...)
     (\"group2\" \"dict2\" \"dict3\"))
+Any cons cell here means using all dictionaries.
 ")
 
 (defvar sdcv-program-path "sdcv"
@@ -361,4 +373,11 @@ this list is nil then all the dictionaries will be used.")
 
 (defvar sdcv-dictionary-path nil
   "The path of dictionaries.")
+
+(defvar sdcv-word-processor
+  'sdcv-do-lookup
+  "This is the function that take a word (stirng) and return the lookup result (string).
+Normally, it is just `sdcv-do-lookup'.  Pre/Post processing like
+simplified-traditional Chinese conversion can be done here.")
+
 ;;; sdcv-mode.el ends here
