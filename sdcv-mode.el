@@ -31,19 +31,21 @@
 
 ;;; Changelog:
 
-;; 2011/12/27
+;; 2012/01/02
 ;;     * New variable: `sdcv-word-processor'
 ;;     * Breaking change:
 ;;       for `sdcv-dictionary-list' and `sdcv-dictionary-alist',
 ;;       non-list (non-nil) value now means full dictionary list
 ;;     * Rewrite `sdcv-search' for both interactive and non-interactive use
 ;;     * `sdcv-dictionary-list' is left for customization use only
+;;     * Better highlighting.
+;;
 ;; 2011/06/30
 ;;     * New feature: parse output for failed lookup
 ;;     * Keymap modification
 ;;
 ;; 2008/06/11
-;;     * sdcv-mode v 0.1 init
+;;     * sdcv-mode v 0.1 init (with background process)
 
 ;;; Code:
 
@@ -107,15 +109,24 @@ Word may contain some special characters:
          (kill-process (get-process sdcv-process-name)))
     (while (get-process sdcv-process-name)
       (sleep-for 0.01)))
-  (if (not interactive-p)
-      (funcall sdcv-word-processor word)
+  (let ((result
+         (concat ">>>"
+          (mapconcat
+           (lambda (w) (sdcv-do-lookup w))
+           (if sdcv-word-processor
+               (let ((processed (funcall sdcv-word-processor word)))
+                 (if (listp processed) processed (list processed)))
+             (list word))
+           ">>>"))))
+    (if (not interactive-p)
+        result
       (with-current-buffer (get-buffer-create sdcv-buffer-name)
         (setq buffer-read-only nil)
         (erase-buffer)
-        (insert (funcall sdcv-word-processor word)))
-    (sdcv-goto-sdcv)
-    (sdcv-mode)
-    (sdcv-mode-reinit)))
+        (insert result))
+      (sdcv-goto-sdcv)
+      (sdcv-mode)
+      (sdcv-mode-reinit))))
 
 (defun sdcv-list-dictionary ()
   "Show available dictionaries."
@@ -173,7 +184,9 @@ and `sdcv-dictionary-path'."
 (defvar sdcv-mode-font-lock-keywords
   '(
     ;; dictionary name
-    ("^-->\\(.*\\)$" . (1 font-lock-type-face))
+    ("^-->\\(.*\\)$" . (1 sdcv-hit-face))
+    ("^==>\\(.*\\)$" . (1 sdcv-failed-face))
+    ("^\\(>>>.*\\)$" . (1 sdcv-heading-face))
     )
   "Expressions to hilight in `sdcv-mode'")
 
@@ -195,7 +208,7 @@ and `sdcv-dictionary-path'."
 Turning on Text mode runs the normal hook `sdcv-mode-hook'."
   (setq font-lock-defaults '(sdcv-mode-font-lock-keywords))
   (setq buffer-read-only t)
-  (set (make-local-variable 'outline-regexp) "^-->.*\n-->")
+  (set (make-local-variable 'outline-regexp) "-->.*\n-->\\|==>\\|>>>")
   (set (make-local-variable font-lock-string-face) nil)
 )
 
@@ -203,28 +216,25 @@ Turning on Text mode runs the normal hook `sdcv-mode-hook'."
   "Re-initialize buffer.
 Hide all entrys but the first one and goto
 the beginning of the buffer."
-  (setq buffer-read-only nil)
-
-  (unless (sdcv-lookup-hit-p)
-    (goto-char (point-min))
-    (let ((save-word ""))
-      (while (re-search-forward "^[0-9]+).*-->\\(.*\\)$" nil t)
-        (let ((cur-word (match-string-no-properties 1)))
-          (unless (string= save-word cur-word)
-            (setq save-word cur-word)
-            (re-search-backward "^\\(.\\)" nil t)
-            (match-string 1)
-            (insert (format "\n-->%s\n-->\n" save-word)))))))
   (ignore-errors
+    (setq buffer-read-only nil)
+    (sdcv-parse-failed)
     (setq buffer-read-only t)
     (hide-body)
     (goto-char (point-min))
     (forward-line 1)
     (show-entry)))
 
-(defun sdcv-lookup-hit-p ()
-  (string-match-p "^-->.*\n-->"
-                  (buffer-substring-no-properties (point-min) (point-max))))
+(defun sdcv-parse-failed ()
+  (goto-char (point-min))
+  (let (save-word)
+    (while (re-search-forward "^[0-9]+).*-->\\(.*\\)$" nil t)
+      (let ((cur-word (match-string-no-properties 1)))
+        (unless (string= save-word cur-word)
+          (setq save-word cur-word)
+          (re-search-backward "^\\(.\\)" nil t)
+          (match-string 1)
+          (insert (format "\n==>%s\n" save-word)))))))
 
 (defun sdcv-next-entry ()
   (interactive)
@@ -269,7 +279,7 @@ the beginning of the buffer."
 	  (kill-process process)
 	  (error "ERROR: timeout waiting for sdcv"))
 	(erase-buffer)
-	rlt))))
+    rlt))))
 
 (defvar sdcv-wait-timeout 2
   "The max time (in seconds) to wait for the sdcv process to
@@ -374,10 +384,30 @@ Any cons cell here means using all dictionaries.
 (defvar sdcv-dictionary-path nil
   "The path of dictionaries.")
 
-(defvar sdcv-word-processor
-  'sdcv-do-lookup
-  "This is the function that take a word (stirng) and return the lookup result (string).
-Normally, it is just `sdcv-do-lookup'.  Pre/Post processing like
-simplified-traditional Chinese conversion can be done here.")
+(defvar sdcv-word-processor nil
+  "This is the function that take a word (stirng) 
+and return a word or a list of words for lookup by `sdcv-search'.
+All lookup result(s) will finally be concatenated together.
+
+`nil' value means do nothing with the original word.
+
+The following is an example.  This function takes the original word and
+compare whether simplified and traditional form of the word are the same.
+If not, look up both of the words.
+
+      (lambda (word)
+        (let ((sim (chinese-conv word \"simplified\"))
+              (tra (chinese-conv word \"traditional\")))
+          (if (not (string= sim tra))
+              (list sim tra)
+            word)))
+")
+
+(defvar sdcv-hit-face 'font-lock-type-face
+  "Face for search hits")
+(defvar sdcv-failed-face 'font-lock-keyword-face
+  "Face for suggestions for a failed lookup.")
+(defvar sdcv-heading-face 'highlight
+  "Face for heading of lookup")
 
 ;;; sdcv-mode.el ends here

@@ -45,7 +45,7 @@
 (defun chinese-conv (str to &optional from-arg interactive-p)
   "Convert a Chinese string between simplified and traditional form.
 STR is the string to convert.
-TO is the target of conversion, see `chinese-conv-alist'.
+TO is the target of conversion, see `chinese-conv-target-alist'.
 FROM-ARG is the encoding of the source string, see `chinese-conv-default-from'"
   (interactive
    (let* ((guess (or (and transient-mark-mode mark-active
